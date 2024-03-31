@@ -16,13 +16,33 @@
 #include <cstdint>
 #include <bitset>
 #include <map>
+#include <unordered_map>
 #include <sstream>
 
 #include "TFolder.h"
 #include "TFile.h"
 #include "TGraph.h"
 #include "TH1F.h"
+#include "TTree.h"
+//---------------------------------------------------------------------
+struct root_event_raw{
+  uint32_t event_id;
+  double time;
+  std::vector<unsigned long> adcs;
 
+  std::ostream& display(std::ostream& os = std::cout){
+    return os<<event_id<<" "<<time<<" "<<adcs.size()<<std::endl;
+  }
+  
+};
+//---------------------------------------------------------------------
+
+
+struct curr_event_record{
+  //TODO
+  std::unordered_map<uint16_t,uint8_t> m_map;
+
+};
 template <class _tp>
 struct id{
   std::string name;
@@ -114,9 +134,20 @@ struct data_head :
 
   double get_time() const{
     unsigned char const* dp = this->data;
-    uint64_t time_uint{};
-    for (int i=5; i>=0; ++i) time_uint |= (dp[9-i]<<i*8);
-    return time_uint/cs_fz; }
+    uint64_t time_uint = 0;
+    //std::cout<<std::hex;
+    //for (int i=0; i<10; ++i) std::cout<<(int)dp[i]<<" ";
+    //std::cout<<std::dec<<std::endl;
+    time_uint |= (uint64_t)dp[4]<<40;
+    time_uint |= (uint64_t)dp[5]<<32;
+    time_uint |= (uint64_t)dp[6]<<24;
+    time_uint |= (uint64_t)dp[7]<<16;
+    time_uint |= (uint64_t)dp[8]<<8;
+    time_uint |= (uint64_t)dp[9]<<0;
+    //std::cout<<time_uint<<std::endl;
+    return time_uint/cs_fz;
+  }
+
   uint32_t get_event_id() const{
     uint32_t rt{};
     rt |= this->data[10]<<24; rt |= this->data[11]<<16;
@@ -168,7 +199,7 @@ public:
   };
 
   uint8_t FE_ID() const{ return data[3] & 0b00111111; }
-  uint8_t channal_index() const {return data[4] & 0b01111111;}
+  uint8_t channel_index() const {return data[4] & 0b01111111;}
 };
 
 
@@ -194,12 +225,20 @@ struct data_tail : public data_region<unsigned char,event_tail,size_t,FILE*>{
   virtual uint16_t size() const override{
     unsigned char const* dp = this->data;
     uint16_t result = (dp[1]<<8) + dp[2];
-    return result & 0x1FFF; }
+    return result & 0x1FFF;
+  }
 
   virtual bool crc32() const override {
     std::cout<<"TODO!!!"<<std::endl;
     return true;
   }
+
+  uint32_t get_event_id() const{
+    uint32_t rt{};
+    rt |= this->data[4]<<24; rt |= this->data[5]<<16;
+    rt |= this->data[6]<<8; rt |= this->data[7]<<0;
+    return rt; }
+
 };
 
 
@@ -232,9 +271,6 @@ struct unpacker{
 
   void setfile(std::string const& v) {m_fname = v;}
 
-
-
-
   void parse(){
     
     //std::string fname = "RunID66683_20240311L1549_HEIC-Cube_Sci.dat";
@@ -243,7 +279,6 @@ struct unpacker{
     if (!fp){
       throw std::invalid_argument("a invalid input file name");
     }
-    info_out(ftell(fp));
     //for ( int i=0; i<10; ++i){
     //  std::cout<<fseek(fp,0,SEEK_END)<<" "<<ftell(fp)<<std::endl;
     //  std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -300,8 +335,11 @@ struct unpacker{
           uint64_t pos = (uint64_t)ftell(fp)-1;
           head->range[0] = pos; 
           head->range[1] = pos+tail->size();
-          //in_memory[active_event].emplace_back(dynamic_cast<id_t*>(tail));
-          in_memory[active_event].m_tails.emplace_back(tail);
+          auto event_id = tail->get_event_id();
+          in_memory[event_id].m_tails.emplace_back(tail);
+          //in_memory[active_event].m_tails.emplace_back(tail);
+          //std::cout<<std::hex<<ftell(fp)<<std::dec<<"\n";
+          //exit(-1);
           continue;
         }
         fseek(fp,back,SEEK_SET);
@@ -387,15 +425,27 @@ public:
     return true; }
 
   //2.2 and some user defined functions
-  uint32_t baseline(){
+  float baseline(){
     // the lenght of baseline is 3 bytes, so strange ~O_o~.
     uint32_t rt=0;
-    rt |= this->data[6]<<16; rt |= this->data[7]<<8; rt |= this->data[8]<<16;
-    return rt; }
+    rt |= this->data[6]<<16; rt |= this->data[7]<<8; rt |= this->data[8];
+    return 4096.f-rt/128.f;
+  }
+
+  uint32_t baseline_u32(){
+    uint32_t rt=0;
+    rt |= this->data[6]<<16; rt |= this->data[7]<<8; rt |= this->data[8];
+    return rt;
+  }
   uint16_t amp(){
     uint16_t rt=0;
     rt |= (this->data[9]<<8) + this->data[10];
-    return rt & 0x0FFF; } };
+    return 4096.f -(rt & 0x0FFF);
+  }
+
+  uint8_t FE_ID() const{ return data[3] & 0b00111111; }
+  uint8_t channel_index() const {return data[4] & 0b01111111;}
+};
 
 /* struct data_tail : public data_region<unsigned char,event_tail,size_t,FILE*> */ 
   // in "temp.cpp" Line 174
@@ -416,6 +466,7 @@ public:
 
 
 int main(int argc, char* argv[]){
+
   //unpacker<data_head,data_body,data_tail> opt_aa;
   //opt_aa.setfile("RunID10021_20230914L0541_HEIC-Cube_Sci.dat");
   //opt_aa.parse();
@@ -429,7 +480,6 @@ int main(int argc, char* argv[]){
   //  return rt; };
 
   //int i=0;
-  TFile* root_fout = new TFile("temp.root","recreate");
   //for (auto&& x : opt_aa.in_memory){
   //  //std::cout<<x.first<<" "<<x.second.size()<<std::endl;
   //  if (i>=1200 && i<1220){
@@ -450,7 +500,7 @@ int main(int argc, char* argv[]){
   //    TFolder* f = new TFolder(sstr.str().c_str(),sstr.str().c_str());
   //    for (auto&& y : x.second.m_bodys){
   //      std::stringstream sstr;
-  //      sstr<<"timeVsadc-"<<(int)y->FE_ID()<<"-"<<(int)y->channal_index();
+  //      sstr<<"timeVsadc-"<<(int)y->FE_ID()<<"-"<<(int)y->channel_index();
   //      auto* g = to_TGraph(y->adc);
   //      g->SetName(sstr.str().c_str());
   //      f->Add(g);
@@ -471,32 +521,133 @@ int main(int argc, char* argv[]){
 
   std::string datname = argc>=2 ? std::string{argv[1]} 
     : "RunID66683_20240311L1549_HEIC-Cube_Sci.dat";
+  std::string root_raw_name = datname.substr(0,datname.find_last_of('.'))+".root";
+  TFile* root_fout = new TFile(root_raw_name.c_str(),"recreate");
+
+  struct root_event_raw root_event_raw;
+  TTree* atree = new TTree("data","data");
+  atree->Branch("event_id",&root_event_raw.event_id);
+  atree->Branch("time",&root_event_raw.time);
+  atree->Branch("adcs",&root_event_raw.adcs);
+  
+  auto const& to_rootraw_struct = []<class iter_t>
+    (iter_t from_bgn, iter_t from_end, struct root_event_raw& to){
+    to.adcs.clear();
+    for (auto iter = from_bgn; iter != from_end; ++iter){
+      unsigned long tmp = 0;
+      auto& value = **iter;
+      tmp |= (unsigned long)value.FE_ID()<<48;
+      tmp |= (unsigned long)value.channel_index()<<40;
+      tmp |= (unsigned long)value.baseline_u32()<<16;
+      tmp |= (unsigned long)value.amp();
+      to.adcs.emplace_back(tmp); } };
+
   opt_aa.setfile(datname);
   opt_aa.parse();
 
-  size_t i=0;
-  for (auto&& x : opt_aa.in_memory){
-    if (i>500 && i<520){
-      std::stringstream sstr; sstr<<"event-"<<x.first<<"-baseline";
-      TH1F* f = new TH1F(sstr.str().c_str(),sstr.str().c_str(),1000,0,1000);
-      for (auto&& y : x.second.m_bodys){
-        std::cout<<y->baseline()<<" ";
-        f->Fill(y->baseline());
-      }
-      f->Write();
-      std::cout.put('\n');
+  //for (auto&& x : opt_aa.in_memory){
+  //  std::cout<<x.second.m_heads.size()<<" "<<x.second.m_bodys.size()<<" "<<x.second.m_tails.size()<<std::endl; }
+  //exit(0);
 
-      
-    }
-    if (i++>=520) break;
+  for (auto&& x : opt_aa.in_memory){
+    if (x.second.m_heads.size() != x.second.m_tails.size()
+        || x.second.m_heads.size()<1) continue;
+    root_event_raw.event_id = x.second.m_heads[0]->get_event_id();
+    root_event_raw.time = x.second.m_heads[0]->get_time();
+    auto& range = x.second.m_bodys;
+    to_rootraw_struct(range.begin(),range.end(),root_event_raw);
+    //root_event_raw.display();
+    atree->Fill();
   }
 
-  info_out(opt_aa.m_fname);
-  info_out(opt_aa.in_memory.size());
+
+
+  //for (auto&& x : opt_aa.in_memory){
+  //  std::cout<<x.second.m_heads.size()<<" "<<x.second.m_tails.size()<<std::endl;
+  //}
+
+  //size_t i=0;
+  //for (auto&& x : opt_aa.in_memory){
+  //  if (i>500 && i<520){
+  //    std::stringstream sstr; sstr<<"event-"<<x.first<<"-baseline";
+  //    TH1F* f = new TH1F(sstr.str().c_str(),sstr.str().c_str(),1000,0,1000);
+  //    for (auto&& y : x.second.m_bodys){
+  //      std::cout<<y->baseline()<<" ";
+  //      f->Fill(y->baseline());
+  //    }
+  //    f->Write();
+  //    std::cout.put('\n');
+
+  //    
+  //  }
+  //  if (i++>=520) break;
+  //}
+
+  //info_out(opt_aa.m_fname);
+  //info_out(opt_aa.in_memory.size());
   opt_aa.clear();
+  atree->Write();
 
   root_fout->Write(); root_fout->Close();
 
+#ifdef TEST_0
+  std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+  {
+    typedef struct{
+      struct channel_t{
+        uint8_t FE_id;
+        uint8_t channel_index;
+        uint32_t baseline;
+        uint16_t amp;
+      };
+
+      void load_channel(unsigned long from){
+        channel_t info;
+        info.FE_id = (from>>48); info.channel_index = (from>>40) & 0xFF;
+        info.baseline = (from>>16) & 0xFFFFFF; info.amp = from & 0xFFFF;
+        channels.emplace_back(info);
+      }
+      std::ostream& display_channels(std::ostream& os = std::cout){
+        for (auto&& x : channels){
+          os <<(int)x.FE_id<<" "
+            <<(int)x.channel_index<<" "
+            <<(4096.f-x.baseline/128)<<" "
+            <<(4096.f-x.amp)<<" "
+            <<"\n";
+        }
+        return os;
+      }
+      uint32_t event_id;
+      double time;
+      std::vector<channel_t> channels;
+    } event_info_t;
+
+    auto* fin = new TFile(root_raw_name.c_str());
+    auto* data_tree = static_cast<TTree*>(fin->Get("data"));
+    //std::cout<<data_tree<<std::endl; exit(0);
+
+    event_info_t event_info;
+
+    data_tree->SetBranchAddress("event_id",&event_info.event_id);
+    data_tree->SetBranchAddress("time",&event_info.time);
+    std::vector<unsigned long>* aplace;
+    data_tree->SetBranchAddress("adcs",&aplace);
+
+    auto const& to_event_info = [&aplace,&event_info](TTree* tr, int64_t i){
+      tr->GetEntry(i);
+      event_info.channels.clear();
+      for (auto&& x : aplace[0])  event_info.load_channel(x);
+    };
+
+    for (int i=0; i<data_tree->GetEntries(); ++i){
+      to_event_info(data_tree,i);
+      event_info.display_channels();
+      std::cout<<"================================="<<std::endl;
+    }
+
+    fin->Close();
+  }
+#endif
 
   return 0;
 }
