@@ -14,11 +14,15 @@
 #include <thread>
 #include <fcntl.h>
 #include <cstdint>
+#include <mutex>
+#include <thread>
 #include <bitset>
 #include <map>
 #include <unordered_map>
 #include <sstream>
+#include <fstream>
 
+#ifdef ROOT_IMPORT
 #include "TFolder.h"
 #include "TFile.h"
 #include "TGraph.h"
@@ -26,6 +30,7 @@
 #include "TTree.h"
 //---------------------------------------------------------------------
 struct root_event_raw{
+  uint32_t unique_id;
   uint32_t event_id;
   double time;
   std::vector<unsigned long> adcs;
@@ -37,6 +42,7 @@ struct root_event_raw{
 };
 //---------------------------------------------------------------------
 
+#endif
 
 struct curr_event_record{
   //TODO
@@ -129,6 +135,7 @@ struct data_head :
 
   virtual bool crc32() const override{
     std::cout<<"TODO!!!"<<std::endl;
+        //info_out(ftell(fp));
     return true;
   }
 
@@ -246,6 +253,9 @@ struct data_tail : public data_region<unsigned char,event_tail,size_t,FILE*>{
 template <class _tp, class _up , class _fp>
 struct unpacker{
 
+  constexpr static uint32_t s_complete_size=10;
+  constexpr static uint32_t s_loop_size=0xFFFF;
+
   typedef id<std::array<uint64_t,2>> id_t;
   typedef struct{
     std::vector<_tp*> m_heads;
@@ -261,6 +271,7 @@ struct unpacker{
 
   //std::map<uint32_t,std::vector<id_t*>>  in_memory;
   std::map<uint32_t,event_t> in_memory;
+  typedef decltype(std::begin(in_memory)) map_iter_t;
   uint32_t active_event = (std::numeric_limits<uint32_t>::max)();
 
   void clear(){
@@ -268,13 +279,58 @@ struct unpacker{
     in_memory.clear();
   }
   std::string m_fname;
+  std::mutex m_mutex;
 
   void setfile(std::string const& v) {m_fname = v;}
+
+  map_iter_t get_event_id(uint32_t raw_id){
+    if (auto iter = in_memory.find(raw_id); iter != in_memory.end()){
+      if (iter->second.m_heads.size()==iter->second.m_tails.size()){
+        if (iter->second.m_heads.size()==s_complete_size) return get_event_id(raw_id+s_loop_size);
+        else{
+          if (true){ 
+           //TODO: while distance with prev same key too long; shoule return 'get_event_id(raw_id+s_loop_size)'
+            return iter;
+          }else{
+            return iter;
+          }
+        }
+      }else{
+       return iter;
+      }
+    }else{
+      in_memory.insert(std::make_pair(raw_id,event_t{}));
+      return in_memory.find(raw_id);
+    }
+  }
 
   void parse(){
     
     //std::string fname = "RunID66683_20240311L1549_HEIC-Cube_Sci.dat";
     auto* fp = fopen(m_fname.c_str(),"r");
+    fseek(fp,0,SEEK_END); long fs = ftell(fp); fseek(fp,0,SEEK_SET);
+
+    //std::cout.put('\t'); std::cout.put('\t');
+    //std::cout.put('|');
+    //for (int i=0; i<100; ++i) std::cout.put(' ');
+    //std::cout.put('|');
+    //std::cout<<std::endl;
+    bool is_v = true;
+    //std::thread viewer([&,this](){
+    //    while(is_v){
+    //      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    //      std::lock_guard<std::mutex> lock(m_mutex);
+    //      std::cout<<"\r";
+    //      std::cout.put('\t'); std::cout.put('\t');
+
+    //      for (int i=0; i<100*ftell(fp)/fs; ++i) std::cout.put('=');
+    //      std::cout.put('>');
+    //      std::cout<<100*ftell(fp)/(double)fs<<"%";
+    //      std::cout<<std::flush;
+    //    }
+    //    });
+    //viewer.detach();
+
     
     if (!fp){
       throw std::invalid_argument("a invalid input file name");
@@ -283,14 +339,14 @@ struct unpacker{
     //  std::cout<<fseek(fp,0,SEEK_END)<<" "<<ftell(fp)<<std::endl;
     //  std::this_thread::sleep_for(std::chrono::milliseconds(300));
     //}
+    map_iter_t curr_event = std::end(in_memory);
 
     while(!feof(fp)){
-      unsigned char data;
+      unsigned char data = 0;
       fread(&data,sizeof(unsigned char),1,fp);
       //info_out(fread(&data,sizeof(unsigned char),1,fp));
       //std::cout<<std::hex<<data<<std::dec<<std::endl;
       if (data==0x5A){
-
         long back = ftell(fp);
         _tp* head = new _tp(fp);
         if (head->valid()){
@@ -302,8 +358,9 @@ struct unpacker{
           uint64_t pos = (uint64_t)ftell(fp)-1;
           head->range[0] = pos; 
           head->range[1] = pos+head->size();
-          //in_memory[evt_id].emplace_back(dynamic_cast<id_t*>(head));
-          in_memory[evt_id].m_heads.emplace_back(head);
+          
+          //in_memory[evt_id].m_heads.emplace_back(head);
+          (curr_event=get_event_id(evt_id))->second.m_heads.emplace_back(head);
           active_event = evt_id;
           //fseek(fp,-1,SEEK_CUR);
           continue;
@@ -320,7 +377,7 @@ struct unpacker{
           head->range[0] = pos; 
           head->range[1] = pos+body->size();
           //in_memory[active_event].emplace_back(dynamic_cast<id_t*>(body));
-          in_memory[active_event].m_bodys.emplace_back(body);
+          if (curr_event != std::end(in_memory)) curr_event->second.m_bodys.emplace_back(body);
           continue;
         }
         fseek(fp,back,SEEK_SET);
@@ -329,6 +386,7 @@ struct unpacker{
         back = ftell(fp);
         auto* tail = new _fp(fp);
         if (tail->valid()){
+          //if (in_memory.size()==20) break;
           //std::cout<<"tail get: "<<ftell(fp)-1<<std::endl;
           //fseek(fp,-1,SEEK_CUR);
           tail->name = "tail";
@@ -336,12 +394,13 @@ struct unpacker{
           head->range[0] = pos; 
           head->range[1] = pos+tail->size();
           auto event_id = tail->get_event_id();
-          in_memory[event_id].m_tails.emplace_back(tail);
+          get_event_id(event_id)->second.m_tails.emplace_back(tail);
           //in_memory[active_event].m_tails.emplace_back(tail);
           //std::cout<<std::hex<<ftell(fp)<<std::dec<<"\n";
           //exit(-1);
           continue;
         }
+
         fseek(fp,back,SEEK_SET);
         delete tail;
         //fseek(fp,-11,SEEK_CUR);
@@ -350,7 +409,12 @@ struct unpacker{
       }
       //if (ftell(fp)>=50000) break;
     }
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      is_v = false;
+    }
     fclose(fp);
+    std::cout<<std::endl<<"\t\tW>~ _ <~W "<< std::endl;
        
 
   }
@@ -463,132 +527,135 @@ public:
 
 
 
-
-
 int main(int argc, char* argv[]){
 
-  //unpacker<data_head,data_body,data_tail> opt_aa;
-  //opt_aa.setfile("RunID10021_20230914L0541_HEIC-Cube_Sci.dat");
-  //opt_aa.parse();
-  ////opt_aa.display();
-  //auto const& to_TGraph = [](unsigned char* addr){
-  //  auto* rt = new TGraph(512);
-  //  for (int i=0; i<1024; i+=2){
-  //    uint16_t value = 4096.f - (((addr[i]<<8) + addr[i+1]) & 0x0FFF);
-  //    rt->SetPoint(i/2,i/2,value);
-  //  }
-  //  return rt; };
-
-  //int i=0;
-  //for (auto&& x : opt_aa.in_memory){
-  //  //std::cout<<x.first<<" "<<x.second.size()<<std::endl;
-  //  if (i>=1200 && i<1220){
-
-  //    //for (auto&& y : x.second){
-  //    //  if(y->name=="body"){
-  //    //    unsigned char* adc_datas = dynamic_cast<data_body*>(y)->adc;
-  //    //    std::cout<<adc_datas[0]<<std::endl;
-  //    //    //unsigned char* adc_datas = static_cast<data_body*>(y)->adc;
-  //    //    //info_out(adc_datas);
-  //    //  }
-  //    //}
-  //    //std::cout<<x.first<<" "
-  //    //  <<x.second.m_heads.size()<<" "
-  //    //  <<x.second.m_bodys.size()<<" "
-  //    //  <<x.second.m_tails.size();
-  //    std::stringstream sstr; sstr<<"event-"<<x.first;
-  //    TFolder* f = new TFolder(sstr.str().c_str(),sstr.str().c_str());
-  //    for (auto&& y : x.second.m_bodys){
-  //      std::stringstream sstr;
-  //      sstr<<"timeVsadc-"<<(int)y->FE_ID()<<"-"<<(int)y->channel_index();
-  //      auto* g = to_TGraph(y->adc);
-  //      g->SetName(sstr.str().c_str());
-  //      f->Add(g);
-  //    }
-  //    f->Write();
-
-  //    std::cout.put('\n');
-  //  }
-  //  i++;
-  //  if (i>=1220) break;
-  //  
-  //}
-  //opt_aa.clear();
-
-
-  //---------------------------------------------------------------------
   unpacker<data_head,data_body_new,data_tail> opt_aa;
 
   std::string datname = argc>=2 ? std::string{argv[1]} 
     : "RunID66683_20240311L1549_HEIC-Cube_Sci.dat";
-  std::string root_raw_name = datname.substr(0,datname.find_last_of('.'))+".root";
-  TFile* root_fout = new TFile(root_raw_name.c_str(),"recreate");
-
-  struct root_event_raw root_event_raw;
-  TTree* atree = new TTree("data","data");
-  atree->Branch("event_id",&root_event_raw.event_id);
-  atree->Branch("time",&root_event_raw.time);
-  atree->Branch("adcs",&root_event_raw.adcs);
-  
-  auto const& to_rootraw_struct = []<class iter_t>
-    (iter_t from_bgn, iter_t from_end, struct root_event_raw& to){
-    to.adcs.clear();
-    for (auto iter = from_bgn; iter != from_end; ++iter){
-      unsigned long tmp = 0;
-      auto& value = **iter;
-      tmp |= (unsigned long)value.FE_ID()<<48;
-      tmp |= (unsigned long)value.channel_index()<<40;
-      tmp |= (unsigned long)value.baseline_u32()<<16;
-      tmp |= (unsigned long)value.amp();
-      to.adcs.emplace_back(tmp); } };
-
   opt_aa.setfile(datname);
   opt_aa.parse();
 
-  //for (auto&& x : opt_aa.in_memory){
-  //  std::cout<<x.second.m_heads.size()<<" "<<x.second.m_bodys.size()<<" "<<x.second.m_tails.size()<<std::endl; }
-  //exit(0);
 
-  for (auto&& x : opt_aa.in_memory){
-    if (x.second.m_heads.size() != x.second.m_tails.size()
-        || x.second.m_heads.size()<1) continue;
-    root_event_raw.event_id = x.second.m_heads[0]->get_event_id();
-    root_event_raw.time = x.second.m_heads[0]->get_time();
-    auto& range = x.second.m_bodys;
-    to_rootraw_struct(range.begin(),range.end(),root_event_raw);
-    //root_event_raw.display();
-    atree->Fill();
-  }
+  //std::ofstream fout("aaa.txt");
 
+  //std::size_t index = 0;
+  //size_t low_bound = 0;
+  //size_t up_bound = opt_aa.in_memory.size();
 
-
-  //for (auto&& x : opt_aa.in_memory){
-  //  std::cout<<x.second.m_heads.size()<<" "<<x.second.m_tails.size()<<std::endl;
-  //}
-
-  //size_t i=0;
-  //for (auto&& x : opt_aa.in_memory){
-  //  if (i>500 && i<520){
-  //    std::stringstream sstr; sstr<<"event-"<<x.first<<"-baseline";
-  //    TH1F* f = new TH1F(sstr.str().c_str(),sstr.str().c_str(),1000,0,1000);
-  //    for (auto&& y : x.second.m_bodys){
-  //      std::cout<<y->baseline()<<" ";
-  //      f->Fill(y->baseline());
+  //index = 0;
+  //for (auto iter = opt_aa.in_memory.begin(); iter != opt_aa.in_memory.end(); ++iter){
+  //  if (index>=low_bound && index<up_bound){
+  //    fout<<iter->first<<" "<<iter->second.m_heads.size()<<" "
+  //      <<iter->second.m_bodys.size()<<" "<<iter->second.m_tails.size()<<std::endl;
+  //    for (auto&& y : iter->second.m_heads) fout<<y->get_time()<<" ";
+  //    for (auto&& y : iter->second.m_bodys){
+  //      fout<<"\t"<<(int)y->FE_ID()<<" "<<(int)y->channel_index()<<" "<<(int)y->baseline_u32()<<" "<<y->amp()<<"\n";
   //    }
-  //    f->Write();
-  //    std::cout.put('\n');
-
-  //    
-  //  }
-  //  if (i++>=520) break;
+  //    fout<<"\n";
+  //  }else if (index>up_bound)
+  //    break;
+  //  index++;
   //}
 
-  //info_out(opt_aa.m_fname);
-  //info_out(opt_aa.in_memory.size());
-  opt_aa.clear();
-  atree->Write();
 
-  root_fout->Write(); root_fout->Close();
+
+
+  //fout.close();
+
+
+
+
+
+#ifdef ROOT_IMPORT
+  {
+    std::string root_raw_name = datname.substr(0,datname.find_last_of('.'))+".root";
+    TFile* root_fout = new TFile(root_raw_name.c_str(),"recreate");
+
+    struct root_event_raw root_event_raw;
+    TTree* atree = new TTree("data","data");
+    atree->Branch("event_id",&root_event_raw.event_id);
+    atree->Branch("unique_id",&root_event_raw.unique_id);
+    atree->Branch("time",&root_event_raw.time);
+    atree->Branch("adcs",&root_event_raw.adcs);
+    info_out(atree);
+    
+    auto const& to_rootraw_struct = []<class iter_t>
+      (iter_t from_bgn, iter_t from_end, struct root_event_raw& to){
+      to.adcs.clear();
+      for (auto iter = from_bgn; iter != from_end; ++iter){
+        unsigned long tmp = 0;
+        auto& value = **iter;
+        tmp |= (unsigned long)value.FE_ID()<<48;
+        tmp |= (unsigned long)value.channel_index()<<40;
+        tmp |= (unsigned long)value.baseline_u32()<<16;
+        tmp |= (unsigned long)value.amp();
+        to.adcs.emplace_back(tmp); } };
+
+
+    std::ofstream fout("aaa.txt");
+    info_out("====");
+
+    for (auto&& x : opt_aa.in_memory){
+      if (x.second.m_heads.size() != x.second.m_tails.size()
+          || x.second.m_heads.size()<1) continue;
+      //std::cout<<x.first<<" "<<x.second.m_heads.size()<<" "<<x.second.m_bodys.size()<<" "<<x.second.m_tails.size()<<std::endl;
+      root_event_raw.unique_id = x.first;
+      root_event_raw.event_id = x.second.m_heads[0]->get_event_id();
+      root_event_raw.time = x.second.m_heads[0]->get_time();
+      auto& range = x.second.m_bodys;
+      to_rootraw_struct(range.begin(),range.end(),root_event_raw);
+      root_event_raw.display(fout);
+      atree->Fill();
+    }
+
+    fout.close();
+
+//    for (auto&& x : opt_aa.in_memory){
+//      if (x.second.m_heads.size() != x.second.m_tails.size()
+//          || x.second.m_heads.size()<1) continue;
+//      info_out("====");
+//      //root_event_raw.unique_id = x.first;
+//      //root_event_raw.event_id = x.second.m_heads[0]->get_event_id();
+//      //root_event_raw.time = x.second.m_heads[0]->get_time();
+//      //auto& range = x.second.m_bodys;
+//      //to_rootraw_struct(range.begin(),range.end(),root_event_raw);
+//      //root_event_raw.display();
+//      //atree->Fill();
+//      //break;
+//    }
+
+
+
+    //for (auto&& x : opt_aa.in_memory){
+    //  std::cout<<x.second.m_heads.size()<<" "<<x.second.m_tails.size()<<std::endl;
+    //}
+
+    //size_t i=0;
+    //for (auto&& x : opt_aa.in_memory){
+    //  if (i>500 && i<520){
+    //    std::stringstream sstr; sstr<<"event-"<<x.first<<"-baseline";
+    //    TH1F* f = new TH1F(sstr.str().c_str(),sstr.str().c_str(),1000,0,1000);
+    //    for (auto&& y : x.second.m_bodys){
+    //      std::cout<<y->baseline()<<" ";
+    //      f->Fill(y->baseline());
+    //    }
+    //    f->Write();
+    //    std::cout.put('\n');
+
+    //    
+    //  }
+    //  if (i++>=520) break;
+    //}
+
+    //info_out(opt_aa.m_fname);
+    //info_out(opt_aa.in_memory.size());
+    opt_aa.clear();
+    atree->Write();
+
+    root_fout->Write(); root_fout->Close();
+  }
+#endif
 
 #ifdef TEST_0
   std::this_thread::sleep_for(std::chrono::milliseconds(2000));
@@ -651,4 +718,4 @@ int main(int argc, char* argv[]){
 
   return 0;
 }
-//g++ -std=c++11 -pthread -Wall -fPIC -O3 -m64 -rdynamic read_new.cxx -o read `root-config --libs --cflags`
+//g++ -std=c++11 -pthread -Wall -fPIC -O3 -m64 -rdynamic read_new.cxx -o read -DROOT_IMPORT `root-config --libs --cflags`
